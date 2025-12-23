@@ -1,7 +1,7 @@
-import { uWebSocketClient } from "./uWebSocketClient";
-import { uWebSocketsTransport, TransportOptions } from "./uWebSocketsTransport";
+// packages/transport/uwebsockets-transport/src/index.ts
+import { uWebSocketClient } from "./uWebSocketClient.mjs";
+import { uWebSocketsTransport } from "./uWebSocketsTransport.mjs";
 export {
-  TransportOptions,
   uWebSocketClient,
   uWebSocketsTransport
 };

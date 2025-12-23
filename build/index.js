@@ -17,16 +17,14 @@ var __copyProps = (to, from, except, desc) => {
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var src_exports = {};
 __export(src_exports, {
-  TransportOptions: () => import_uWebSocketsTransport.TransportOptions,
   uWebSocketClient: () => import_uWebSocketClient.uWebSocketClient,
   uWebSocketsTransport: () => import_uWebSocketsTransport.uWebSocketsTransport
 });
 module.exports = __toCommonJS(src_exports);
-var import_uWebSocketClient = require("./uWebSocketClient");
-var import_uWebSocketsTransport = require("./uWebSocketsTransport");
+var import_uWebSocketClient = require("./uWebSocketClient.js");
+var import_uWebSocketsTransport = require("./uWebSocketsTransport.js");
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  TransportOptions,
   uWebSocketClient,
   uWebSocketsTransport
 });

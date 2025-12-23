@@ -1,14 +1,17 @@
+// packages/transport/uwebsockets-transport/src/uWebSocketsTransport.ts
 import querystring from "querystring";
 import uWebSockets from "uWebSockets.js";
-import { DummyServer, ErrorCode, matchMaker, getBearerToken, Transport, debugAndPrintError, spliceOne } from "@colyseus/core";
-import { uWebSocketClient, uWebSocketWrapper } from "./uWebSocketClient";
-class uWebSocketsTransport extends Transport {
+import expressify from "uwebsockets-express";
+import { HttpServerMock, ErrorCode, matchMaker, getBearerToken, Transport, debugAndPrintError, spliceOne } from "@colyseus/core";
+import { uWebSocketClient, uWebSocketWrapper } from "./uWebSocketClient.mjs";
+var uWebSocketsTransport = class extends Transport {
   constructor(options = {}, appOptions = {}) {
     super();
     this.clients = [];
     this.clientWrappers = /* @__PURE__ */ new WeakMap();
     this._originalRawSend = null;
     this.app = appOptions.cert_file_name && appOptions.key_file_name ? uWebSockets.SSLApp(appOptions) : uWebSockets.App(appOptions);
+    this.expressApp = expressify(this.app);
     if (options.maxBackpressure === void 0) {
       options.maxBackpressure = 1024 * 1024;
     }
@@ -22,20 +25,22 @@ class uWebSocketsTransport extends Transport {
       options.sendPingsAutomatically = true;
     }
     if (!this.server) {
-      this.server = new DummyServer();
+      this.server = new HttpServerMock();
     }
     this.app.ws("/*", {
       ...options,
       upgrade: (res, req, context) => {
         const headers = {};
         req.forEach((key, value) => headers[key] = value);
+        const searchParams = querystring.parse(req.getQuery());
         res.upgrade(
           {
             url: req.getUrl(),
-            query: req.getQuery(),
-            headers,
-            connection: {
-              remoteAddress: Buffer.from(res.getRemoteAddressAsText()).toString()
+            searchParams,
+            context: {
+              token: searchParams._authToken ?? getBearerToken(req.getHeader("authorization")),
+              headers,
+              ip: headers["x-real-ip"] ?? headers["x-forwarded-for"] ?? Buffer.from(res.getRemoteAddressAsText()).toString()
             }
           },
           req.getHeader("sec-websocket-key"),
@@ -47,6 +52,9 @@ class uWebSocketsTransport extends Transport {
       open: async (ws) => {
         await this.onConnection(ws);
       },
+      // pong: (ws: RawWebSocketClient) => {
+      //     ws.pingCount = 0;
+      // },
       close: (ws, code, message) => {
         spliceOne(this.clients, this.clients.indexOf(ws));
         const clientWrapper = this.clientWrappers.get(ws);
@@ -56,7 +64,7 @@ class uWebSocketsTransport extends Transport {
         }
       },
       message: (ws, message, isBinary) => {
-        this.clientWrappers.get(ws)?.emit("message", Buffer.from(message.slice(0)));
+        this.clientWrappers.get(ws)?.emit("message", Buffer.from(message));
       }
     });
     this.registerMatchMakeRequest();
@@ -85,30 +93,31 @@ class uWebSocketsTransport extends Transport {
       this._originalRawSend = uWebSocketClient.prototype.raw;
     }
     const originalRawSend = this._originalRawSend;
-    uWebSocketClient.prototype.raw = milliseconds <= Number.EPSILON ? originalRawSend : function() {
-      setTimeout(() => originalRawSend.apply(this, arguments), milliseconds);
+    uWebSocketClient.prototype.raw = milliseconds <= Number.EPSILON ? originalRawSend : function(...args) {
+      let [buf, ...rest] = args;
+      buf = Buffer.from(buf);
+      setTimeout(() => originalRawSend.apply(this, [buf, ...rest]), milliseconds);
     };
   }
   async onConnection(rawClient) {
     const wrapper = new uWebSocketWrapper(rawClient);
     this.clients.push(rawClient);
     this.clientWrappers.set(rawClient, wrapper);
-    const query = rawClient.query;
     const url = rawClient.url;
-    const searchParams = querystring.parse(query);
+    const searchParams = rawClient.searchParams;
     const sessionId = searchParams.sessionId;
     const processAndRoomId = url.match(/\/[a-zA-Z0-9_\-]+\/([a-zA-Z0-9_\-]+)$/);
     const roomId = processAndRoomId && processAndRoomId[1];
-    const room = matchMaker.getRoomById(roomId);
+    const room = matchMaker.getLocalRoomById(roomId);
     const client = new uWebSocketClient(sessionId, wrapper);
     try {
       if (!room || !room.hasReservedSeat(sessionId, searchParams.reconnectionToken)) {
         throw new Error("seat reservation expired.");
       }
-      await room._onJoin(client, rawClient);
+      await room._onJoin(client, rawClient.context);
     } catch (e) {
       debugAndPrintError(e);
-      client.error(e.code, e.message, () => rawClient.close());
+      client.error(e.code, e.message, () => client.leave());
     }
   }
   registerMatchMakeRequest() {
@@ -132,8 +141,10 @@ class uWebSocketsTransport extends Transport {
       if (res.aborted) {
         return;
       }
-      res.writeStatus("406 Not Acceptable");
-      res.end(JSON.stringify(error));
+      res.cork(() => {
+        res.writeStatus("406 Not Acceptable");
+        res.end(JSON.stringify(error));
+      });
     };
     const onAborted = (res) => {
       res.aborted = true;
@@ -147,7 +158,7 @@ class uWebSocketsTransport extends Transport {
     });
     this.app.post("/matchmake/*", (res, req) => {
       res.onAborted(() => onAborted(res));
-      if (matchMaker.isGracefullyShuttingDown) {
+      if (matchMaker.state === matchMaker.MatchMakerState.SHUTTING_DOWN) {
         return res.close();
       }
       writeHeaders(req, res);
@@ -155,9 +166,9 @@ class uWebSocketsTransport extends Transport {
       const url = req.getUrl();
       const matchedParams = url.match(allowedRoomNameChars);
       const matchmakeIndex = matchedParams.indexOf(matchmakeRoute);
-      const authToken = getBearerToken(req.getHeader("authorization"));
       const headers = {};
       req.forEach((key, value) => headers[key] = value);
+      const token = getBearerToken(headers["authorization"]);
       this.readJson(res, async (clientOptions) => {
         try {
           if (clientOptions === void 0) {
@@ -169,11 +180,17 @@ class uWebSocketsTransport extends Transport {
             method,
             roomName,
             clientOptions,
-            { token: authToken, request: { headers } }
+            {
+              token,
+              headers,
+              ip: headers["x-real-ip"] ?? headers["x-forwarded-for"] ?? Buffer.from(res.getRemoteAddressAsText()).toString()
+            }
           );
           if (!res.aborted) {
-            res.writeStatus("200 OK");
-            res.end(JSON.stringify(response));
+            res.cork(() => {
+              res.writeStatus("200 OK");
+              res.end(JSON.stringify(response));
+            });
           }
         } catch (e) {
           debugAndPrintError(e);
@@ -184,28 +201,9 @@ class uWebSocketsTransport extends Transport {
         }
       });
     });
-    this.app.get("/matchmake/*", async (res, req) => {
-      res.onAborted(() => onAborted(res));
-      writeHeaders(req, res);
-      res.writeHeader("Content-Type", "application/json");
-      const url = req.getUrl();
-      const matchedParams = url.match(allowedRoomNameChars);
-      const roomName = matchedParams.length > 1 ? matchedParams[matchedParams.length - 1] : "";
-      try {
-        const response = await matchMaker.controller.getAvailableRooms(roomName || "");
-        if (!res.aborted) {
-          res.writeStatus("200 OK");
-          res.end(JSON.stringify(response));
-        }
-      } catch (e) {
-        debugAndPrintError(e);
-        writeError(res, {
-          code: e.code || ErrorCode.MATCHMAKE_UNHANDLED,
-          error: e.message
-        });
-      }
-    });
   }
+  /* Helper function for reading a posted JSON body */
+  /* Extracted from https://github.com/uNetworking/uWebSockets.js/blob/master/examples/JsonPost.js */
   readJson(res, cb) {
     let buffer;
     res.onData((ab, isLast) => {
@@ -238,7 +236,7 @@ class uWebSocketsTransport extends Transport {
       }
     });
   }
-}
+};
 export {
   uWebSocketsTransport
 };

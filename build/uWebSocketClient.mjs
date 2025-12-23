@@ -1,12 +1,12 @@
+// packages/transport/uwebsockets-transport/src/uWebSocketClient.ts
 import EventEmitter from "events";
 import { getMessageBytes, Protocol, ClientState, logger, debugMessage } from "@colyseus/core";
-import { Schema } from "@colyseus/schema";
-class uWebSocketWrapper extends EventEmitter {
+var uWebSocketWrapper = class extends EventEmitter {
   constructor(ws) {
     super();
     this.ws = ws;
   }
-}
+};
 var ReadyState = /* @__PURE__ */ ((ReadyState2) => {
   ReadyState2[ReadyState2["CONNECTING"] = 0] = "CONNECTING";
   ReadyState2[ReadyState2["OPEN"] = 1] = "OPEN";
@@ -14,7 +14,7 @@ var ReadyState = /* @__PURE__ */ ((ReadyState2) => {
   ReadyState2[ReadyState2["CLOSED"] = 3] = "CLOSED";
   return ReadyState2;
 })(ReadyState || {});
-class uWebSocketClient {
+var uWebSocketClient = class {
   constructor(id, _ref) {
     this.id = id;
     this._ref = _ref;
@@ -41,13 +41,13 @@ class uWebSocketClient {
   send(messageOrType, messageOrOptions, options) {
     debugMessage("send(to %s): '%s' -> %O", this.sessionId, messageOrType, messageOrOptions);
     this.enqueueRaw(
-      messageOrType instanceof Schema ? getMessageBytes[Protocol.ROOM_DATA_SCHEMA](messageOrType) : getMessageBytes.raw(Protocol.ROOM_DATA, messageOrType, messageOrOptions),
+      getMessageBytes.raw(Protocol.ROOM_DATA, messageOrType, messageOrOptions),
       options
     );
   }
   enqueueRaw(data, options) {
     if (options?.afterNextPatch) {
-      this._afterNextPatchQueue.push([this, arguments]);
+      this._afterNextPatchQueue.push([this, [data]]);
       return;
     }
     if (this.state === ClientState.JOINING) {
@@ -60,11 +60,13 @@ class uWebSocketClient {
     if (this.readyState !== 1 /* OPEN */) {
       return;
     }
-    this._ref.ws.send(new Uint8Array(data), true, false);
+    this._ref.ws.send(data, true, false);
   }
   error(code, message = "", cb) {
     this.raw(getMessageBytes[Protocol.ERROR](code, message));
-    cb();
+    if (cb) {
+      setTimeout(cb, 1);
+    }
   }
   leave(code, data) {
     if (this.readyState !== 1 /* OPEN */) {
@@ -89,7 +91,7 @@ class uWebSocketClient {
   toJSON() {
     return { sessionId: this.sessionId, readyState: this.readyState };
   }
-}
+};
 export {
   ReadyState,
   uWebSocketClient,

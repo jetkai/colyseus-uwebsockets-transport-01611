@@ -1,19 +1,17 @@
+import { ParsedUrlQuery } from 'querystring';
 import uWebSockets from 'uWebSockets.js';
-import { Transport } from '@colyseus/core';
-import { uWebSocketWrapper } from './uWebSocketClient';
+import { Application } from "uwebsockets-express";
+import { AuthContext, Transport } from '@colyseus/core';
+import { uWebSocketWrapper } from './uWebSocketClient.js';
 export type TransportOptions = Omit<uWebSockets.WebSocketBehavior<any>, "upgrade" | "open" | "pong" | "close" | "message">;
 type RawWebSocketClient = uWebSockets.WebSocket<any> & {
     url: string;
-    query: string;
-    headers: {
-        [key: string]: string;
-    };
-    connection: {
-        remoteAddress: string;
-    };
+    searchParams: ParsedUrlQuery;
+    context: AuthContext;
 };
 export declare class uWebSocketsTransport extends Transport {
     app: uWebSockets.TemplatedApp;
+    expressApp: Application;
     protected clients: RawWebSocketClient[];
     protected clientWrappers: WeakMap<RawWebSocketClient, uWebSocketWrapper>;
     private _listeningSocket;

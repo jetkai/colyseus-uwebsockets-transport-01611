@@ -17,6 +17,10 @@ var __copyProps = (to, from, except, desc) => {
   return to;
 };
 var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
   isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
   mod
 ));
@@ -28,8 +32,9 @@ __export(uWebSocketsTransport_exports, {
 module.exports = __toCommonJS(uWebSocketsTransport_exports);
 var import_querystring = __toESM(require("querystring"));
 var import_uWebSockets = __toESM(require("uWebSockets.js"));
+var import_uwebsockets_express = __toESM(require("uwebsockets-express"));
 var import_core = require("@colyseus/core");
-var import_uWebSocketClient = require("./uWebSocketClient");
+var import_uWebSocketClient = require("./uWebSocketClient.js");
 class uWebSocketsTransport extends import_core.Transport {
   constructor(options = {}, appOptions = {}) {
     super();
@@ -37,6 +42,7 @@ class uWebSocketsTransport extends import_core.Transport {
     this.clientWrappers = /* @__PURE__ */ new WeakMap();
     this._originalRawSend = null;
     this.app = appOptions.cert_file_name && appOptions.key_file_name ? import_uWebSockets.default.SSLApp(appOptions) : import_uWebSockets.default.App(appOptions);
+    this.expressApp = (0, import_uwebsockets_express.default)(this.app);
     if (options.maxBackpressure === void 0) {
       options.maxBackpressure = 1024 * 1024;
     }
@@ -50,20 +56,22 @@ class uWebSocketsTransport extends import_core.Transport {
       options.sendPingsAutomatically = true;
     }
     if (!this.server) {
-      this.server = new import_core.DummyServer();
+      this.server = new import_core.HttpServerMock();
     }
     this.app.ws("/*", {
       ...options,
       upgrade: (res, req, context) => {
         const headers = {};
         req.forEach((key, value) => headers[key] = value);
+        const searchParams = import_querystring.default.parse(req.getQuery());
         res.upgrade(
           {
             url: req.getUrl(),
-            query: req.getQuery(),
-            headers,
-            connection: {
-              remoteAddress: Buffer.from(res.getRemoteAddressAsText()).toString()
+            searchParams,
+            context: {
+              token: searchParams._authToken ?? (0, import_core.getBearerToken)(req.getHeader("authorization")),
+              headers,
+              ip: headers["x-real-ip"] ?? headers["x-forwarded-for"] ?? Buffer.from(res.getRemoteAddressAsText()).toString()
             }
           },
           req.getHeader("sec-websocket-key"),
@@ -75,6 +83,9 @@ class uWebSocketsTransport extends import_core.Transport {
       open: async (ws) => {
         await this.onConnection(ws);
       },
+      // pong: (ws: RawWebSocketClient) => {
+      //     ws.pingCount = 0;
+      // },
       close: (ws, code, message) => {
         (0, import_core.spliceOne)(this.clients, this.clients.indexOf(ws));
         const clientWrapper = this.clientWrappers.get(ws);
@@ -84,7 +95,7 @@ class uWebSocketsTransport extends import_core.Transport {
         }
       },
       message: (ws, message, isBinary) => {
-        this.clientWrappers.get(ws)?.emit("message", Buffer.from(message.slice(0)));
+        this.clientWrappers.get(ws)?.emit("message", Buffer.from(message));
       }
     });
     this.registerMatchMakeRequest();
@@ -113,30 +124,31 @@ class uWebSocketsTransport extends import_core.Transport {
       this._originalRawSend = import_uWebSocketClient.uWebSocketClient.prototype.raw;
     }
     const originalRawSend = this._originalRawSend;
-    import_uWebSocketClient.uWebSocketClient.prototype.raw = milliseconds <= Number.EPSILON ? originalRawSend : function() {
-      setTimeout(() => originalRawSend.apply(this, arguments), milliseconds);
+    import_uWebSocketClient.uWebSocketClient.prototype.raw = milliseconds <= Number.EPSILON ? originalRawSend : function(...args) {
+      let [buf, ...rest] = args;
+      buf = Buffer.from(buf);
+      setTimeout(() => originalRawSend.apply(this, [buf, ...rest]), milliseconds);
     };
   }
   async onConnection(rawClient) {
     const wrapper = new import_uWebSocketClient.uWebSocketWrapper(rawClient);
     this.clients.push(rawClient);
     this.clientWrappers.set(rawClient, wrapper);
-    const query = rawClient.query;
     const url = rawClient.url;
-    const searchParams = import_querystring.default.parse(query);
+    const searchParams = rawClient.searchParams;
     const sessionId = searchParams.sessionId;
     const processAndRoomId = url.match(/\/[a-zA-Z0-9_\-]+\/([a-zA-Z0-9_\-]+)$/);
     const roomId = processAndRoomId && processAndRoomId[1];
-    const room = import_core.matchMaker.getRoomById(roomId);
+    const room = import_core.matchMaker.getLocalRoomById(roomId);
     const client = new import_uWebSocketClient.uWebSocketClient(sessionId, wrapper);
     try {
       if (!room || !room.hasReservedSeat(sessionId, searchParams.reconnectionToken)) {
         throw new Error("seat reservation expired.");
       }
-      await room._onJoin(client, rawClient);
+      await room._onJoin(client, rawClient.context);
     } catch (e) {
       (0, import_core.debugAndPrintError)(e);
-      client.error(e.code, e.message, () => rawClient.close());
+      client.error(e.code, e.message, () => client.leave());
     }
   }
   registerMatchMakeRequest() {
@@ -160,8 +172,10 @@ class uWebSocketsTransport extends import_core.Transport {
       if (res.aborted) {
         return;
       }
-      res.writeStatus("406 Not Acceptable");
-      res.end(JSON.stringify(error));
+      res.cork(() => {
+        res.writeStatus("406 Not Acceptable");
+        res.end(JSON.stringify(error));
+      });
     };
     const onAborted = (res) => {
       res.aborted = true;
@@ -175,7 +189,7 @@ class uWebSocketsTransport extends import_core.Transport {
     });
     this.app.post("/matchmake/*", (res, req) => {
       res.onAborted(() => onAborted(res));
-      if (import_core.matchMaker.isGracefullyShuttingDown) {
+      if (import_core.matchMaker.state === import_core.matchMaker.MatchMakerState.SHUTTING_DOWN) {
         return res.close();
       }
       writeHeaders(req, res);
@@ -183,9 +197,9 @@ class uWebSocketsTransport extends import_core.Transport {
       const url = req.getUrl();
       const matchedParams = url.match(allowedRoomNameChars);
       const matchmakeIndex = matchedParams.indexOf(matchmakeRoute);
-      const authToken = (0, import_core.getBearerToken)(req.getHeader("authorization"));
       const headers = {};
       req.forEach((key, value) => headers[key] = value);
+      const token = (0, import_core.getBearerToken)(headers["authorization"]);
       this.readJson(res, async (clientOptions) => {
         try {
           if (clientOptions === void 0) {
@@ -197,11 +211,17 @@ class uWebSocketsTransport extends import_core.Transport {
             method,
             roomName,
             clientOptions,
-            { token: authToken, request: { headers } }
+            {
+              token,
+              headers,
+              ip: headers["x-real-ip"] ?? headers["x-forwarded-for"] ?? Buffer.from(res.getRemoteAddressAsText()).toString()
+            }
           );
           if (!res.aborted) {
-            res.writeStatus("200 OK");
-            res.end(JSON.stringify(response));
+            res.cork(() => {
+              res.writeStatus("200 OK");
+              res.end(JSON.stringify(response));
+            });
           }
         } catch (e) {
           (0, import_core.debugAndPrintError)(e);
@@ -212,28 +232,9 @@ class uWebSocketsTransport extends import_core.Transport {
         }
       });
     });
-    this.app.get("/matchmake/*", async (res, req) => {
-      res.onAborted(() => onAborted(res));
-      writeHeaders(req, res);
-      res.writeHeader("Content-Type", "application/json");
-      const url = req.getUrl();
-      const matchedParams = url.match(allowedRoomNameChars);
-      const roomName = matchedParams.length > 1 ? matchedParams[matchedParams.length - 1] : "";
-      try {
-        const response = await import_core.matchMaker.controller.getAvailableRooms(roomName || "");
-        if (!res.aborted) {
-          res.writeStatus("200 OK");
-          res.end(JSON.stringify(response));
-        }
-      } catch (e) {
-        (0, import_core.debugAndPrintError)(e);
-        writeError(res, {
-          code: e.code || import_core.ErrorCode.MATCHMAKE_UNHANDLED,
-          error: e.message
-        });
-      }
-    });
   }
+  /* Helper function for reading a posted JSON body */
+  /* Extracted from https://github.com/uNetworking/uWebSockets.js/blob/master/examples/JsonPost.js */
   readJson(res, cb) {
     let buffer;
     res.onData((ab, isLast) => {

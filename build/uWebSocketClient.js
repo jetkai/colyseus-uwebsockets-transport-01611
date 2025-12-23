@@ -17,6 +17,10 @@ var __copyProps = (to, from, except, desc) => {
   return to;
 };
 var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
   isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
   mod
 ));
@@ -30,7 +34,6 @@ __export(uWebSocketClient_exports, {
 module.exports = __toCommonJS(uWebSocketClient_exports);
 var import_events = __toESM(require("events"));
 var import_core = require("@colyseus/core");
-var import_schema = require("@colyseus/schema");
 class uWebSocketWrapper extends import_events.default {
   constructor(ws) {
     super();
@@ -71,13 +74,13 @@ class uWebSocketClient {
   send(messageOrType, messageOrOptions, options) {
     (0, import_core.debugMessage)("send(to %s): '%s' -> %O", this.sessionId, messageOrType, messageOrOptions);
     this.enqueueRaw(
-      messageOrType instanceof import_schema.Schema ? import_core.getMessageBytes[import_core.Protocol.ROOM_DATA_SCHEMA](messageOrType) : import_core.getMessageBytes.raw(import_core.Protocol.ROOM_DATA, messageOrType, messageOrOptions),
+      import_core.getMessageBytes.raw(import_core.Protocol.ROOM_DATA, messageOrType, messageOrOptions),
       options
     );
   }
   enqueueRaw(data, options) {
     if (options?.afterNextPatch) {
-      this._afterNextPatchQueue.push([this, arguments]);
+      this._afterNextPatchQueue.push([this, [data]]);
       return;
     }
     if (this.state === import_core.ClientState.JOINING) {
@@ -90,11 +93,13 @@ class uWebSocketClient {
     if (this.readyState !== 1 /* OPEN */) {
       return;
     }
-    this._ref.ws.send(new Uint8Array(data), true, false);
+    this._ref.ws.send(data, true, false);
   }
   error(code, message = "", cb) {
     this.raw(import_core.getMessageBytes[import_core.Protocol.ERROR](code, message));
-    cb();
+    if (cb) {
+      setTimeout(cb, 1);
+    }
   }
   leave(code, data) {
     if (this.readyState !== 1 /* OPEN */) {
